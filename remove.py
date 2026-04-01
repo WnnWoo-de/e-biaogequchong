@@ -1,64 +1,121 @@
-import pandas as pd
+import argparse
 import os
+from typing import List
+
+import pandas as pd
 
 
-def remove_duplicates_and_save(file_path, output_file='去重后的最终名单.xlsx'):
-    # --- 配置区域 ---
-    # 这里填写你Excel中实际的列名，用于判断“谁是同一个人”
-    col_id = '学号'
-    col_name = '姓名'
-    # ----------------
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """清理列名空格，避免列名不一致导致找不到字段。"""
+    copied = df.copy()
+    copied.columns = [str(col).strip() for col in copied.columns]
+    return copied
 
-    print(f"正在读取文件: {file_path} ...")
 
-    if not os.path.exists(file_path):
-        print(f"❌ 错误: 找不到文件 '{file_path}'，请检查路径。")
+def normalize_dedup_columns(df: pd.DataFrame, dedup_columns: List[str]) -> pd.DataFrame:
+    """仅清理去重字段（转字符串并去空格），避免误匹配。"""
+    copied = df.copy()
+    for col in dedup_columns:
+        copied[col] = copied[col].astype(str).str.strip()
+    return copied
+
+
+def validate_columns(df: pd.DataFrame, dedup_columns: List[str], filename: str) -> bool:
+    """检查去重列是否完整存在。"""
+    missing = [col for col in dedup_columns if col not in df.columns]
+    if missing:
+        print(f"❌ 文件 '{filename}' 缺少必要列: {missing}")
+        print(f"   当前列名: {list(df.columns)}")
+        return False
+    return True
+
+
+def merge_and_deduplicate(
+    input_files: List[str],
+    output_file: str,
+    dedup_columns: List[str],
+    keep: str = "first",
+) -> None:
+    """
+    合并多个 Excel 文件并按指定列去重。
+    """
+    if not input_files:
+        print("❌ 未提供任何输入文件。")
         return
 
-    try:
-        # 读取 Excel 文件
-        df = pd.read_excel(file_path)
+    valid_dfs = []
+    total_read_rows = 0
 
-        # 检查列名是否存在
-        if col_id not in df.columns or col_name not in df.columns:
-            print(f"❌ 错误: 表格中找不到列名 '{col_id}' 或 '{col_name}'。")
-            print(f"当前表格的所有列名: {list(df.columns)}")
+    for path in input_files:
+        if not os.path.exists(path):
+            print(f"⚠️ 找不到文件，已跳过: {path}")
+            continue
+
+        try:
+            df = pd.read_excel(path)
+            df = normalize_columns(df)
+            if not validate_columns(df, dedup_columns, path):
+                return
+            df = normalize_dedup_columns(df, dedup_columns)
+            valid_dfs.append(df)
+            total_read_rows += len(df)
+            print(f"📖 已读取: {path} ({len(df)} 行)")
+        except Exception as exc:
+            print(f"❌ 读取失败: {path}，错误: {exc}")
             return
 
-        # 记录去重前的行数
-        original_count = len(df)
-        print(f"📊 原始数据共有: {original_count} 条")
+    if not valid_dfs:
+        print("❌ 没有可用数据，处理结束。")
+        return
 
-        # 【核心代码】删除重复项
-        # subset: 依据学号和姓名判断
-        # keep='first': 保留第一次出现的记录，删除后面重复的
-        # (如果想保留最后一次出现的，把 'first' 改为 'last')
-        df_cleaned = df.drop_duplicates(subset=[col_id, col_name], keep='first')
+    merged_df = pd.concat(valid_dfs, ignore_index=True)
+    before_count = len(merged_df)
+    deduped_df = merged_df.drop_duplicates(subset=dedup_columns, keep=keep)
+    after_count = len(deduped_df)
 
-        # 记录去重后的行数
-        cleaned_count = len(df_cleaned)
-        removed_count = original_count - cleaned_count
+    deduped_df.to_excel(output_file, index=False)
 
-        if removed_count == 0:
-            print("✅ 未发现重复项，无需清理。")
-            # 即使没有重复，也建议保存一份或者提示用户
-        else:
-            print(f"✂️ 删除了 {removed_count} 条重复记录。")
-            print(f"✅ 剩余有效数据: {cleaned_count} 条")
-
-            # 保存结果到新的 Excel
-            df_cleaned.to_excel(output_file, index=False)
-            print("-" * 30)
-            print(f"📄 处理完成！结果已保存为: {output_file}")
-            print("-" * 30)
-
-    except Exception as e:
-        print(f"❌ 发生未知错误: {e}")
+    print("\n✅ 处理完成")
+    print(f"   输入文件数: {len(valid_dfs)}")
+    print(f"   累计读取行数: {total_read_rows}")
+    print(f"   合并后行数: {before_count}")
+    print(f"   去重后行数: {after_count}")
+    print(f"   删除重复数: {before_count - after_count}")
+    print(f"   输出文件: {output_file}")
 
 
-# --- 执行部分 ---
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Excel 合并去重工具")
+    parser.add_argument(
+        "-i",
+        "--inputs",
+        nargs="+",
+        required=False,
+        default=["参与人员加分表.xlsx"],
+        help="待处理 Excel 文件（可传多个）",
+    )
+    parser.add_argument(
+        "-o",
+        "--output",
+        default="合并去重后的最终名单.xlsx",
+        help="输出文件名",
+    )
+    parser.add_argument(
+        "-c",
+        "--columns",
+        nargs="+",
+        default=["姓名", "学号"],
+        help="用于判重的列名（可多个）",
+    )
+    parser.add_argument(
+        "--keep",
+        choices=["first", "last"],
+        default="first",
+        help="重复项保留策略：first 或 last",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    # 替换为你的文件名
-    input_filename = '参与人员加分表.xlsx'
-
-    remove_duplicates_and_save(input_filename)
+    args = parse_args()
+    merge_and_deduplicate(args.inputs, args.output, args.columns, args.keep)
