@@ -82,6 +82,27 @@ def validate_columns(df: pd.DataFrame, dedup_columns: List[str], filename: str) 
     return True
 
 
+def read_and_clean_file(path: str, dedup_columns: List[str]) -> pd.DataFrame:
+    """读取单个 Excel 文件并完成表头识别、列名标准化、去重字段清洗、空行过滤。"""
+    header_row = find_header_row(path, dedup_columns)
+    if header_row > 0:
+        print(f"[识别] {path} 的表头在第 {header_row + 1} 行，已自动跳过标题行")
+    df = pd.read_excel(path, header=header_row, dtype=str)
+    df = normalize_columns(df)
+    if not validate_columns(df, dedup_columns, path):
+        return None
+    df = normalize_dedup_columns(df, dedup_columns)
+    # 去掉去重字段全为空的行
+    present_cols = [col for col in dedup_columns if col in df.columns]
+    if present_cols:
+        before_drop = len(df)
+        df = df[~df[present_cols].eq("").any(axis=1)].copy()
+        dropped = before_drop - len(df)
+        if dropped:
+            print(f"   - 已跳过 {dropped} 行空数据")
+    return df
+
+
 def save_dataframe_with_template(df: pd.DataFrame, output_file: str, template_file: str, description: str) -> None:
     """使用模板文件导出 DataFrame，保留原始 Excel 格式（字体、列宽等）。"""
     print(f"[导出] 正在导出{description} ({output_file})...")
@@ -133,26 +154,14 @@ def merge_and_deduplicate(
             continue
 
         try:
-            header_row = find_header_row(path, dedup_columns)
-            if header_row > 0:
-                print(f"[识别] {path} 的表头在第 {header_row + 1} 行，已自动跳过标题行")
-            df = pd.read_excel(path, header=header_row, dtype=str)
-            df = normalize_columns(df)
-            if not validate_columns(df, dedup_columns, path):
+            print(f"[读取] {path}...")
+            df = read_and_clean_file(path, dedup_columns)
+            if df is None:
                 return
-            df = normalize_dedup_columns(df, dedup_columns)
-            # 去掉去重字段全为空的行
-            present_cols = [col for col in dedup_columns if col in df.columns]
-            if present_cols:
-                before_drop = len(df)
-                df = df[~df[present_cols].eq("").any(axis=1)].copy()
-                dropped = before_drop - len(df)
-                if dropped:
-                    print(f"   - 已跳过 {dropped} 行空数据")
             valid_dfs.append(df)
             valid_files.append(path)
             total_read_rows += len(df)
-            print(f"[读取] {path} ({len(df)} 行)")
+            print(f"   - 读取完成 ({len(df)} 行)")
         except Exception as exc:
             print(f"[错误] 读取失败: {path}，错误: {exc}")
             return
@@ -173,7 +182,10 @@ def merge_and_deduplicate(
     deduped_df = merged_df.drop_duplicates(subset=dedup_columns, keep=keep)
     after_count = len(deduped_df)
 
-    # 默认使用第一个有效文件作为样式模板
+    # 确定模板文件：优先用用户指定的，否则用第一个输入文件
+    if template_file and not os.path.exists(template_file):
+        print(f"[警告] 模板文件 {template_file} 不存在，将使用第一个输入文件作为模板")
+        template_file = None
     if not template_file:
         template_file = valid_files[0]
 
@@ -185,11 +197,12 @@ def merge_and_deduplicate(
     print(f"   - 合并后行数: {before_count}")
     print(f"   - 去重后行数: {after_count}")
     print(f"   - 删除重复数: {before_count - after_count}")
+    print(f"   - 输出文件: {output_file}")
 
     if duplicate_output_file:
         if duplicate_people_df is not None and not duplicate_people_df.empty:
             save_dataframe_with_template(duplicate_people_df, duplicate_output_file, template_file, "重复名单")
-            print(f"   - 重复人员: {len(duplicate_people_df)} 人")
+            print(f"   - 重复人员: {len(duplicate_people_df)} 人，已保存至 {duplicate_output_file}")
         else:
             print("[提示] 未发现重复人员。")
 
